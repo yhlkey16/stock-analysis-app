@@ -1,16 +1,12 @@
-import os
-import requests
-from bs4 import BeautifulSoup
-import google.generativeai as genai
-import json
 import streamlit as st
-import yfinance as yf # 導入 yfinance
-import pandas as pd   # 導入 pandas 用於數據處理
+import pandas as pd
+import yfinance as yf
+import os
+import pandas_ta as ta
+import google.generativeai as genai
 
-# --- (initialize_model 函式和之前完全一樣) ---
-# @st.cache_data
+@st.cache_data
 def initialize_model():
-    """從環境變數讀取 API 金鑰並初始化 Gemini 模型"""
     try:
         api_key = os.environ.get("GOOGLE_API_KEY")
         if not api_key:
@@ -23,151 +19,168 @@ def initialize_model():
         st.error(f"❌ AI 模型初始化失敗：{e}")
         return None
 
-# --- AI 新聞分析函式 (升級版) ---
-def analyze_stock_news(url, model):
-    """接收一個新聞網址，爬取內容，並使用 Gemini 分析情緒和股票代碼。"""
-    if not model:
-        st.error("模型未初始化，無法進行分析。")
-        return None
-
+@st.cache_data
+def get_stock_data(ticker):
     try:
-        # (爬蟲部分和之前一樣)
-        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
-        response = requests.get(url, headers=headers)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        article_body = soup.find('div', class_='content-main')
-        if not article_body:
-            st.warning("❌ 解析失敗：在網頁中找不到新聞內文區塊。請確認網址是鉅亨網的文章頁面。")
-            return None
-        article_text = article_body.get_text(strip=True, separator='\n')
-    except requests.exceptions.RequestException as e:
-        st.error(f"❌ 爬取網頁失敗：{e}")
-        return None
-
-    # --- 升級版的 Prompt ---
-    # 我們新增了一個指令，要求 AI 找出股票代碼
-    prompt = f"""
-    請你扮演一位專業的台灣股市金融分析師。
-    請閱讀以下這篇財經新聞，並完全遵循以下指示：
-    1.  找出這篇新聞主要報導的台灣上市公司股票代碼 (ticker)。如果找不到，請回傳 "N/A"。
-    2.  判斷新聞對股價的潛在情緒是「正面」、「負面」還是「中性」。
-    3.  用 3-4 句話，以條列式的方式，總結新聞的關鍵重點。
-    4.  提取新聞中最重要的 3 到 5 個關鍵字。
-    5.  將你的分析結果以一個標準的 JSON 格式回傳，不要有任何多餘的文字。
-        JSON 必須包含以下四個鍵(key)：
-        - "ticker": (string) 股票代碼，例如 "2330" 或 "N/A"
-        - "sentiment": (string) 情緒判斷 ("正面", "負面", "中性")
-        - "summary": (string) 重點摘要
-        - "keywords": (array of strings) 關鍵字列表
-
-    新聞內文如下：
-    ---
-    {article_text[:4000]} 
-    ---
-    """
-
-    try:
-        response = model.generate_content(prompt)
-        cleaned_response = response.text.strip().replace('```json', '').replace('```', '')
-        analysis_result = json.loads(cleaned_response)
-        return analysis_result
-    except Exception as e:
-        st.error(f"❌ AI 分析或 JSON 解析失敗：{e}")
-        return None
-
-# --- 新功能：抓取股價並繪圖 ---
-def get_stock_data_and_plot(ticker):
-    """使用 yfinance 抓取股票資料並顯示指標與圖表"""
-    try:
-        # yfinance 需要台灣股票代碼後面加上 ".TW"
         stock_ticker = f"{ticker}.TW"
         stock = yf.Ticker(stock_ticker)
-
-        # 獲取今日的詳細資訊
         info = stock.info
-        
-        # 獲取近三個月的歷史股價
-        hist = stock.history(period="3mo")
-
+        hist = stock.history(period="1y")
         if hist.empty:
-            st.warning(f"找不到股票代碼 {ticker} 的歷史股價數據。")
-            return
-
-        st.subheader(f"📈 {info.get('longName', ticker)} 即時股價資訊")
-
-        # 使用欄位來並排顯示指標
-        col1, col2, col3 = st.columns(3)
-        current_price = info.get('regularMarketPrice', 'N/A')
-        previous_close = info.get('previousClose', 0)
+            return None, None, None
         
-        # 計算漲跌幅
-        price_change = "N/A"
-        price_change_percent = "N/A"
-        if isinstance(current_price, (int, float)) and previous_close > 0:
-            price_change = current_price - previous_close
-            price_change_percent = (price_change / previous_close) * 100
-            
-        with col1:
-            st.metric("目前股價", f"{current_price:.2f}", f"{price_change:.2f} ({price_change_percent:.2f}%)")
-        with col2:
-            st.metric("成交量", f"{info.get('regularMarketVolume', 0):,}")
-        with col3:
-            st.metric("開盤價", f"{info.get('regularMarketOpen', 'N/A'):.2f}")
-
-        # 顯示近三個月股價走勢圖
-        st.subheader("近三個月股價走勢")
-        # 我們只畫出收盤價
-        st.line_chart(hist['Close'])
-
+        financials = stock.financials
+        
+        hist.ta.sma(length=50, append=True)
+        hist.ta.sma(length=200, append=True)
+        hist.ta.rsi(length=14, append=True)
+        
+        return info, hist, financials
     except Exception as e:
-        st.error(f"❌ 抓取股價資訊時發生錯誤：{e}")
+        st.error(f"抓取 {ticker} 股價資訊時發生錯誤: {e}")
+        return None, None
 
+def get_ai_overall_analysis(model, ticker, news_sentiment, news_summary, info, hist):
+    st.subheader("🤖 AI 總體健診")
 
-# --- Streamlit App 的主體介面 (升級版) ---
+    if st.button(f"產生 {ticker} 的 AI 總體健診報告"):
+        with st.spinner("AI 正在深度分析所有數據，請稍候..."):
+            try:
+                latest_data = hist.iloc[-1]
+                current_price = latest_data['Close']
+                sma50 = latest_data['SMA_50']
+                sma200 = latest_data['SMA_200']
+                rsi_value = latest_data['RSI_14']
+                pe_ratio = info.get('trailingPE', 'N/A')
+                pb_ratio = info.get('priceToBook', 'N/A')
+                held_percent_institutions = info.get('heldPercentInstitutions', 0)
+                
+                price_vs_sma50 = "高於" if current_price > sma50 else "低於"
+                price_vs_sma200 = "高於" if current_price > sma200 else "低於"
 
-st.set_page_config(page_title="AI 個股儀表板", page_icon="📊")
-st.title("📊 AI 個股新聞儀表板")
-st.markdown("結合新聞情緒分析與即時股價數據，提供更全面的個股洞察。")
-st.markdown("---")
+                mega_prompt = f"""
+                請扮演一位資深、客觀、數據驅動的避險基金分析師。
+                你的任務是根據我提供的多面向數據，為股票 {ticker} 生成一份均衡的「看漲理由」與「看跌理由」分析報告。
+                請嚴格僅使用我提供的數據，不要引入任何外部資訊或個人觀點。
+                分析應簡潔、專業，並以條列式呈現。不要提供任何直接的投資建議。
 
-url = st.text_input("請在此貼上鉅亨網(cnyes)的新聞網址：", placeholder="例如：關於台積電、聯發科等公司的新聞...")
+                [數據點]
+                1.  消息面分析：
+                    -   相關新聞情緒：「{news_sentiment}」
+                    -   新聞摘要：{news_summary}
 
-if st.button("啟動分析引擎"):
-    if url:
-        gemini_model = initialize_model()
-        if gemini_model:
-            with st.spinner("正在進行 AI 新聞分析..."):
-                analysis_result = analyze_stock_news(url, gemini_model)
-            
-            if analysis_result:
-                st.success("新聞分析完成！")
-                st.subheader("📰 AI 質化分析結果")
+                2.  技術面分析：
+                    -   目前股價：{current_price:.2f}
+                    -   股價與50日均線關係：目前股價「{price_vs_sma50}」50日線 ({sma50:.2f})
+                    -   股價與200日均線關係：目前股價「{price_vs_sma200}」200日線 ({sma200:.2f})
+                    -   14日 RSI 指數：{rsi_value:.2f}
 
-                # (顯示新聞分析結果的部分和之前類似)
-                sentiment = analysis_result.get('sentiment', 'N/A')
-                if sentiment == "正面":
-                    st.metric(label="新聞情緒", value=sentiment, delta="利多 👍")
-                elif sentiment == "負面":
-                    st.metric(label="新聞情緒", value=sentiment, delta="利空 👎", delta_color="inverse")
+                3.  基本面分析：
+                    -   本益比 (P/E Ratio)：{pe_ratio}
+                    -   股價淨值比 (P/B Ratio)：{pb_ratio}
+
+                4.  籌碼面分析：
+                    -   機構持股比例：{held_percent_institutions:.2%}
+
+                請根據以上數據，生成你的分析報告。
+                """
+
+                response = model.generate_content(mega_prompt)
+                
+                bull_case = "找不到看漲理由"
+                bear_case = "找不到看跌理由"
+
+                if "看漲理由" in response.text and "看跌理由" in response.text:
+                    parts = response.text.split("看跌理由")
+                    bull_case = parts[0].replace("看漲理由", "").strip()
+                    bear_case = parts[1].strip()
                 else:
-                    st.metric(label="新聞情緒", value=sentiment)
+                    st.warning("AI 回應格式非預期，顯示原始文字。")
+                    st.write(response.text)
 
-                with st.expander("重點摘要", expanded=True):
-                    summary_points = analysis_result.get('summary', 'N/A').split('\n')
+                bull_col, bear_col = st.columns(2)
+                with bull_col:
+                    st.markdown("#### 🐂 看漲理由 (Bull Case)")
+                    st.success(bull_case)
+                with bear_col:
+                    st.markdown("#### 🐻 看跌理由 (Bear Case)")
+                    st.error(bear_case)
+
+            except Exception as e:
+                st.error(f"產生 AI 總體健診時發生錯誤：{e}")
+
+
+def display_quantitative_data(ticker, info, hist, financials):
+    st.subheader(f"📈 {ticker} 量化分析")
+    st.markdown("#### 技術面")
+    latest_data = hist.iloc[-1]
+    current_price = latest_data['Close']
+    previous_close = hist.iloc[-2]['Close']
+    price_change = current_price - previous_close
+    price_change_percent = (price_change / previous_close) * 100
+    sub_col1, sub_col2 = st.columns(2)
+    sub_col1.metric("目前股價", f"{current_price:.2f}", f"{price_change:.2f} ({price_change_percent:.2f}%)")
+    rsi_value = latest_data['RSI_14']
+    sub_col2.metric("14日 RSI", f"{rsi_value:.2f}")
+    st.line_chart(hist[['Close', 'SMA_50', 'SMA_200']])
+    st.markdown("#### 基本面 (年度)")
+    if financials is not None and not financials.empty:
+        if all(item in financials.index for item in ['Total Revenue', 'Net Income']):
+            financial_summary = financials.loc[['Total Revenue', 'Net Income']].transpose()
+            financial_summary.index = financial_summary.index.year
+            st.bar_chart(financial_summary)
+        else:
+            st.info("部分年度財報數據欄位缺失。")
+    else:
+        st.info("找不到詳細的年度財報數據。")
+    st.markdown("#### 籌碼面")
+    ownership_data = {'機構持股比例': info.get('heldPercentInstitutions', 0),'內部人士持股比例': info.get('heldPercentInsiders', 0),'機構總數': info.get('institutionCount', 0)}
+    ownership_df = pd.DataFrame(list(ownership_data.items()),columns=['指標', '數值'])
+    ownership_df.loc[ownership_df['指標'].str.contains('比例'), '數值'] = pd.to_numeric(ownership_df['數值'], errors='coerce').map('{:.2%}'.format)
+    st.dataframe(ownership_df, hide_index=True, use_container_width=True)
+
+
+st.set_page_config(page_title="AI 多因子分析儀表板", page_icon="💡", layout="wide")
+st.title("💡 AI 多因子分析儀表板")
+st.markdown("自動分析最新新聞，並整合基本面、技術面數據，提供全方位決策輔助。")
+
+gemini_model = initialize_model()
+DATA_FILE = "news_analysis.csv"
+
+if os.path.exists(DATA_FILE):
+    st.success("成功讀取到新聞分析數據！")
+    df = pd.read_csv(DATA_FILE, dtype={'ticker': str})
+    for index, row in df.iterrows():
+        st.markdown("---")
+        title = row.get('title', '標題不存在')
+        sentiment = row.get('sentiment', 'N/A')
+        summary = row.get('summary', '')
+        ticker = str(row.get('ticker', 'N/A')).strip()
+        is_valid_ticker = (ticker != "N/A" and ticker.lower() != "nan" and ticker.isdigit() and len(ticker) >= 4)
+        
+        with st.expander(f"**{sentiment}** | **{ticker if is_valid_ticker else '市場新聞'}** | {title}", expanded=index == 0):
+            if is_valid_ticker:
+                col1, col2 = st.columns([1, 1.2])
+                with col1:
+                    st.subheader("📰 AI 新聞質化分析")
+                    summary_points = summary.split('\n')
                     for point in summary_points:
                         st.markdown(f"- {point.strip()}")
-                
-                st.info(f"🔑 **關 鍵 字**： {', '.join(analysis_result.get('keywords', []))}")
-                
-                # --- 新增的區塊：處理股價數據 ---
-                st.markdown("---")
-                ticker = analysis_result.get("ticker", "N/A")
-                
-                if ticker != "N/A":
-                    with st.spinner(f"正在抓取股票 {ticker} 的量化數據..."):
-                        get_stock_data_and_plot(ticker)
-                else:
-                    st.info("AI 未能從此篇新聞中識別出有效的股票代碼。")
-    else:
-        st.warning("請先輸入新聞網址！")
+                    st.info(f"**🔑 關 鍵 字**： {row.get('keywords', '')}")
+                    st.markdown(f"[閱讀原文]({row.get('url', '#')})")
+                with col2:
+                    info, hist, financials = get_stock_data(ticker)
+                    if info and not hist.empty:
+                        display_quantitative_data(ticker, info, hist, financials)
+                        get_ai_overall_analysis(gemini_model, ticker, sentiment, summary, info, hist)
+            else:
+                st.subheader("📰 AI 新聞質化分析")
+                summary_points = str(row.get('summary', '')).split('\n')
+                for point in summary_points:
+                    st.markdown(f"- {point.strip()}")
+                st.info(f"**🔑 關 鍵 字**： {row.get('keywords', '')}")
+                st.markdown(f"[閱讀原文]({row.get('url', '#')})")
+                st.info("此篇新聞為市場宏觀分析，或未識別出有效的股票代碼。")
+else:
+    st.warning("⚠️ 找不到 `news_analysis.csv` 檔案。")
+    st.info("請先在您的終端機中執行 `python collector.py` 來產生分析數據。")
